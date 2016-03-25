@@ -1,0 +1,11 @@
+{
+	"ImportPath": "github.com/jkeylu/hosp",
+	"GoVersion": "go1.6",
+	"GodepVersion": "v60",
+	"Deps": [
+		{
+			"ImportPath": "golang.org/x/net/proxy",
+			"Rev": "9d8ef8d73b53840886e4a772c72f2b7d396cb37c"
+		}
+	]
+}
