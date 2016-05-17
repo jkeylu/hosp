@@ -10,20 +10,23 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/rpc"
 	"net/url"
 	"strings"
 	"time"
+	"sync"
 )
 
 const VERSION = "1.0.0"
 
 type WhiteList struct {
 	filepath string
+	rpcPort string
 	list     []string
 }
 
-func NewWhiteList(filepath string) *WhiteList {
-	var wl = &WhiteList{filepath: filepath}
+func NewWhiteList(filepath string, rpcPort string) *WhiteList {
+	var wl = &WhiteList{filepath: filepath, rpcPort: rpcPort}
 	wl.list = make([]string, 0)
 
 	if filepath == "" {
@@ -62,32 +65,86 @@ func (wl *WhiteList) indexOf(host string) int {
 	return -1
 }
 
-func (wl *WhiteList) add(host string) {
+func (wl *WhiteList) Add(host string, reply *bool) error {
 	if wl.has(host) {
-		return
+		*reply = false
+		return nil
 	}
+	*reply = true
 
 	log.Printf("add new host \"%s\"\n", host)
 
 	wl.list = append(wl.list, host)
 	wl.saveToFile()
+
+	return nil
 }
 
-func (wl *WhiteList) remove(host string) {
+func (wl *WhiteList) Remove(host string, reply *bool) error {
 	i := wl.indexOf(host)
 	if i < 0 {
-		return
+		*reply = false
+		return nil
 	}
+	*reply = true
 
 	log.Printf("remove host \"%s\"\n", host)
 
 	wl.list = append(wl.list[:i], wl.list[i+1:]...)
 	wl.saveToFile()
+	return nil
 }
 
 func (wl *WhiteList) saveToFile() {
 	data := []byte(strings.Join(wl.list, "\n"))
 	ioutil.WriteFile(wl.filepath, data, 0644)
+}
+
+func (wl *WhiteList) listenAndServeRpc() {
+	if (wl.rpcPort != "0") {
+		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:" + wl.rpcPort)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		inbound, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("rpc listening on 127.0.0.1:" + rpcPort)
+
+		rpc.Register(wl)
+		rpc.Accept(inbound)
+	}
+}
+
+func (wl *WhiteList) rpcAdd(host string) {
+	client, err := rpc.Dial("tcp", "127.0.0.1:" + wl.rpcPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var reply bool
+	err = client.Call("WhiteList.Add", host, &reply)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("add \"%s\" status: %t\n", host, reply)
+}
+
+func (wl *WhiteList) rpcRemove(host string) {
+	client, err := rpc.Dial("tcp", "127.0.0.1:" + wl.rpcPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var reply bool
+	err = client.Call("WhiteList.Remove", host, &reply)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("add \"%s\" status: %t\n", host, reply)
 }
 
 type Server struct {
@@ -111,7 +168,7 @@ func (server *Server) ListenAndServe() {
 		}
 	}
 
-	log.Println("listening on", server.localAddr)
+	log.Println("http proxy listening on", server.localAddr)
 	if err := http.ListenAndServe(server.localAddr, server); err != nil {
 		log.Fatal(err)
 	}
@@ -271,18 +328,24 @@ func (server *Server) transfer(client *Client) error {
 	return nil
 }
 
-func handleCommandLine() (localAddr, remoteAddr, wlFile string, verbose, version bool) {
+var localAddr, remoteAddr, wlFile string
+var verbose, version bool
+var toAddHost, toRemoveHost string
+var rpcPort string
+
+func init() {
 	flag.StringVar(&localAddr, "l", "127.0.0.1:8080", "set http proxy 'host:port'")
 	flag.StringVar(&remoteAddr, "s", "127.0.0.1:1080", "set remote socks5 server 'host:port'")
 	flag.StringVar(&wlFile, "w", "", "set host white list file path")
+	flag.StringVar(&toAddHost, "a", "", "add white host")
+	flag.StringVar(&toRemoveHost, "r", "", "remove white host")
+	flag.StringVar(&rpcPort, "p", "40401", "set rpc port")
 	flag.BoolVar(&verbose, "verbose", false, "print extra debuging information")
 	flag.BoolVar(&version, "v", false, "display version")
-	flag.Parse()
-	return
 }
 
 func main() {
-	localAddr, remoteAddr, wlFile, verbose, version := handleCommandLine()
+	flag.Parse()
 
 	if flag.NFlag() == 0 && flag.NArg() > 0 {
 		flag.Usage()
@@ -294,12 +357,35 @@ func main() {
 		return
 	}
 
+	whitelist := NewWhiteList(wlFile, rpcPort)
+
+	serve := true
+	if toAddHost != "" {
+		serve = false
+		whitelist.rpcAdd(toAddHost)
+	}
+
+	if toRemoveHost != "" {
+		serve = false
+		whitelist.rpcRemove(toRemoveHost)
+	}
+
+	if !serve {
+		return
+	}
+
 	server := &Server{
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
 		verbose:    verbose,
-		whitelist:  NewWhiteList(wlFile),
+		whitelist:  whitelist,
 	}
 
-	server.ListenAndServe()
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go server.ListenAndServe()
+	go whitelist.listenAndServeRpc()
+
+	wg.Wait()
 }
