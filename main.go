@@ -13,15 +13,15 @@ import (
 	"net/rpc"
 	"net/url"
 	"strings"
-	"time"
 	"sync"
+	"time"
 )
 
-const VERSION = "1.0.0"
+const VERSION = "1.1.0"
 
 type WhiteList struct {
 	filepath string
-	rpcPort string
+	rpcPort  string
 	list     []string
 }
 
@@ -101,8 +101,8 @@ func (wl *WhiteList) saveToFile() {
 }
 
 func (wl *WhiteList) listenAndServeRpc() {
-	if (wl.rpcPort != "0") {
-		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:" + wl.rpcPort)
+	if wl.rpcPort != "0" {
+		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:"+wl.rpcPort)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -120,7 +120,7 @@ func (wl *WhiteList) listenAndServeRpc() {
 }
 
 func (wl *WhiteList) rpcAdd(host string) {
-	client, err := rpc.Dial("tcp", "127.0.0.1:" + wl.rpcPort)
+	client, err := rpc.Dial("tcp", "127.0.0.1:"+wl.rpcPort)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func (wl *WhiteList) rpcAdd(host string) {
 }
 
 func (wl *WhiteList) rpcRemove(host string) {
-	client, err := rpc.Dial("tcp", "127.0.0.1:" + wl.rpcPort)
+	client, err := rpc.Dial("tcp", "127.0.0.1:"+wl.rpcPort)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func main() {
 	}
 
 	if version {
-		log.Printf("v%s\n", VERSION)
+		fmt.Printf("v%s\n", VERSION)
 		return
 	}
 
