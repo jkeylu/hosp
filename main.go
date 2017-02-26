@@ -10,33 +10,37 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/rpc"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
-const VERSION = "1.1.0"
+const VERSION = "1.2.0"
 
 type WhiteList struct {
 	filepath string
-	rpcPort  string
 	list     []string
 }
 
 func NewWhiteList(filepath string, rpcPort string) *WhiteList {
-	var wl = &WhiteList{filepath: filepath, rpcPort: rpcPort}
+	var wl = &WhiteList{filepath: filepath}
+
+	wl.load()
+
+	return wl
+}
+
+func (wl *WhiteList) load() {
 	wl.list = make([]string, 0)
 
-	if filepath == "" {
-		return wl
+	if wl.filepath == "" {
+		return
 	}
 
-	data, err := ioutil.ReadFile(filepath)
+	data, err := ioutil.ReadFile(wl.filepath)
 	if err != nil {
-		log.Printf("read file \"%s\" error\n%v", filepath, err)
-		return wl
+		log.Printf("read file \"%s\" error\n%v", wl.filepath, err)
+		return
 	}
 
 	list := strings.Split(string(data), "\n")
@@ -48,7 +52,6 @@ func NewWhiteList(filepath string, rpcPort string) *WhiteList {
 	}
 
 	log.Printf("white list count: %d\n", len(wl.list))
-	return wl
 }
 
 func (wl *WhiteList) has(host string) bool {
@@ -63,88 +66,6 @@ func (wl *WhiteList) indexOf(host string) int {
 	}
 
 	return -1
-}
-
-func (wl *WhiteList) Add(host string, reply *bool) error {
-	if wl.has(host) {
-		*reply = false
-		return nil
-	}
-	*reply = true
-
-	log.Printf("add new host \"%s\"\n", host)
-
-	wl.list = append(wl.list, host)
-	wl.saveToFile()
-
-	return nil
-}
-
-func (wl *WhiteList) Remove(host string, reply *bool) error {
-	i := wl.indexOf(host)
-	if i < 0 {
-		*reply = false
-		return nil
-	}
-	*reply = true
-
-	log.Printf("remove host \"%s\"\n", host)
-
-	wl.list = append(wl.list[:i], wl.list[i+1:]...)
-	wl.saveToFile()
-	return nil
-}
-
-func (wl *WhiteList) saveToFile() {
-	data := []byte(strings.Join(wl.list, "\n"))
-	ioutil.WriteFile(wl.filepath, data, 0644)
-}
-
-func (wl *WhiteList) listenAndServeRpc() {
-	if wl.rpcPort != "0" {
-		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:"+wl.rpcPort)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		inbound, err := net.ListenTCP("tcp", addr)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Println("rpc listening on 127.0.0.1:" + rpcPort)
-
-		rpc.Register(wl)
-		rpc.Accept(inbound)
-	}
-}
-
-func (wl *WhiteList) rpcAdd(host string) {
-	client, err := rpc.Dial("tcp", "127.0.0.1:"+wl.rpcPort)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var reply bool
-	err = client.Call("WhiteList.Add", host, &reply)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("add \"%s\" status: %t\n", host, reply)
-}
-
-func (wl *WhiteList) rpcRemove(host string) {
-	client, err := rpc.Dial("tcp", "127.0.0.1:"+wl.rpcPort)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var reply bool
-	err = client.Call("WhiteList.Remove", host, &reply)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("add \"%s\" status: %t\n", host, reply)
 }
 
 type Server struct {
@@ -255,38 +176,42 @@ func (server *Server) tunnel(client *Client) error {
 		return err
 	}
 
-	errCh := make(chan error, 2)
-	defer close(errCh)
+	recvDoneCh := make(chan error, 1)
+	defer close(recvDoneCh)
+
+	sendDoneCh := make(chan error, 1)
+	defer close(sendDoneCh)
 
 	go func() {
 		written, err := io.Copy(clientConn, remoteConn)
 		if err == nil && server.verbose {
-			log.Printf("%x %s %d", client.id, "client <- remote", written)
+			log.Printf("%x client <- remote %d", client.id, written)
 		}
-		errCh <- err
+		recvDoneCh <- err
 	}()
 	go func() {
 		written, err := io.Copy(remoteConn, clientConn)
 		if err == nil && server.verbose {
-			log.Printf("%x %s %d", client.id, "client -> remote", written)
+			log.Printf("%x client -> remote %d", client.id, written)
 		}
-		errCh <- err
+		sendDoneCh <- err
 	}()
 
 	if err := establishConnection(clientConn); err != nil {
 		return err
 	}
 
-	for i := 0; i < 2; i++ {
-		select {
-		case err = <-errCh:
-			if err != nil {
-				return err
-			}
+	if e := <-sendDoneCh; e != nil {
+		err = e
+	}
+
+	if e := <-recvDoneCh; e != nil {
+		if err == nil {
+			err = e
 		}
 	}
 
-	return nil
+	return err
 }
 
 func (server *Server) transfer(client *Client) error {
@@ -323,7 +248,7 @@ func (server *Server) transfer(client *Client) error {
 		return err
 	}
 	if server.verbose {
-		log.Printf("%x %s %d", client.id, "transfer", written)
+		log.Printf("%x transfer %d", client.id, written)
 	}
 	return nil
 }
@@ -337,9 +262,6 @@ func init() {
 	flag.StringVar(&localAddr, "l", "127.0.0.1:8080", "set http proxy 'host:port'")
 	flag.StringVar(&remoteAddr, "s", "127.0.0.1:1080", "set remote socks5 server 'host:port'")
 	flag.StringVar(&wlFile, "w", "", "set host white list file path")
-	flag.StringVar(&toAddHost, "a", "", "add white host")
-	flag.StringVar(&toRemoveHost, "r", "", "remove white host")
-	flag.StringVar(&rpcPort, "p", "40401", "set rpc port")
 	flag.BoolVar(&verbose, "verbose", false, "print extra debuging information")
 	flag.BoolVar(&version, "v", false, "display version")
 }
@@ -359,21 +281,6 @@ func main() {
 
 	whitelist := NewWhiteList(wlFile, rpcPort)
 
-	serve := true
-	if toAddHost != "" {
-		serve = false
-		whitelist.rpcAdd(toAddHost)
-	}
-
-	if toRemoveHost != "" {
-		serve = false
-		whitelist.rpcRemove(toRemoveHost)
-	}
-
-	if !serve {
-		return
-	}
-
 	server := &Server{
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
@@ -381,11 +288,5 @@ func main() {
 		whitelist:  whitelist,
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go server.ListenAndServe()
-	go whitelist.listenAndServeRpc()
-
-	wg.Wait()
+	server.ListenAndServe()
 }
